@@ -1,0 +1,23 @@
+{
+  "name": "kaspi-parser-sellers",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "parser.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "fake-useragent": "^1.0.1",
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7",
+    "proxy-chain": "^2.5.9",
+    "puppeteer": "^24.11.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "user-agents": "^1.1.592"
+  }
+}
