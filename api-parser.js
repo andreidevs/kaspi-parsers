@@ -1,8 +1,5 @@
 const fs = require('fs');
-const https = require('https');
-const http = require('http');
-const {HttpsProxyAgent} = require('https-proxy-agent');
-const {HttpProxyAgent} = require('http-proxy-agent');
+const axios = require('axios');
 
 // Настройки
 const OUTPUT_FILE = 'valid_merchant_ids.txt';
@@ -26,7 +23,7 @@ const proxyConfigs = [
     {
         protocol: 'http',
         host: 'brd.superproxy.io',
-        port: 33335,
+        port: 22225,
         auth: {
             username: 'brd-customer-hl_488f646c-zone-isp_proxy1',
             password: '4nqz088zgsve',
@@ -64,136 +61,82 @@ function getRandomProxy() {
     return proxyConfigs[Math.floor(Math.random() * proxyConfigs.length)];
 }
 
-// Функция для создания агента прокси
-function createProxyAgent(proxyConfig) {
-    if (!proxyConfig) return null;
+// Функция для выполнения HTTP запроса с повторными попытками
+async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttempts = 3) {
+    const url = `https://kaspi.kz/yml/review-view/api/v1/reviews/merchant/${merchantId}`;
+    const userAgent = getRandomUserAgent();
 
-    const {protocol, host, port, auth} = proxyConfig;
+    const config = {
+        method: 'GET',
+        url: url,
+        headers: {
+            'User-Agent': userAgent,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Host': 'kaspi.kz',
+            'Referer': `https://kaspi.kz/shop/info/merchant/${merchantId}/review/`,
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
+        },
+        timeout: 10000,
+        validateStatus: function (status) {
+            return status < 500; // Не выбрасывать ошибку для статусов < 500
+        }
+    };
 
-    let proxyUrl;
-    if (auth && auth.username && auth.password) {
-        proxyUrl = `${protocol}://${auth.username}:${auth.password}@${host}:${port}`;
-    } else {
-        proxyUrl = `${protocol}://${host}:${port}`;
+    // Добавляем прокси если есть
+    if (proxyConfig) {
+        config.proxy = {
+            protocol: proxyConfig.protocol,
+            host: proxyConfig.host,
+            port: proxyConfig.port,
+            auth: {
+                username: proxyConfig.auth.username,
+                password: proxyConfig.auth.password
+            }
+        };
     }
 
-    return protocol === 'https' ? new HttpsProxyAgent(proxyUrl) : new HttpProxyAgent(proxyUrl);
-}
+    try {
+        const response = await axios(config);
 
-// Функция для выполнения HTTP запроса с повторными попытками
-function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttempts = 3) {
-    return new Promise((resolve) => {
-        const url = `https://kaspi.kz/yml/review-view/api/v1/reviews/merchant/${merchantId}`;
-        const userAgent = getRandomUserAgent();
-
-        const options = {
-            method: 'GET',
-            headers: {
-                'User-Agent': userAgent,
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Host': 'kaspi.kz',
-                'Referer': `https://kaspi.kz/shop/info/merchant/${merchantId}/review/`,
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin'
-            },
-            timeout: 10000
-        };
-
-        // Добавляем прокси если есть
-        if (proxyConfig) {
-            const agent = createProxyAgent(proxyConfig);
-            if (agent) {
-                options.agent = agent;
-            }
+        // Если получили 429 (Too Many Requests) и есть попытки
+        if (response.status === 429 && attempt < maxAttempts) {
+            console.log(`⚠️ 429 ошибка для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 100мс...`);
+            
+            await new Promise(resolve => setTimeout(resolve, 100));
+            return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
         }
 
-        const req = https.request(url, options, (res) => {
-            let data = '';
+        return {
+            statusCode: response.status,
+            merchantId: merchantId,
+            success: response.status === 200,
+            proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
+            attempt: attempt
+        };
 
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
+    } catch (error) {
+        // При ошибке сети тоже можем повторить
+        if (attempt < maxAttempts && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND')) {
+            console.log(`⚠️ Ошибка сети для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 200мс...`);
+            
+            await new Promise(resolve => setTimeout(resolve, 200));
+            return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
+        }
 
-            res.on('end', () => {
-                // Если получили 429 (Too Many Requests) и есть попытки
-                if (res.statusCode === 429 && attempt < maxAttempts) {
-                    console.log(`⚠️ 429 ошибка для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 2 секунды...`);
-
-                    setTimeout(() => {
-                        makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts)
-                            .then(resolve)
-                            .catch(resolve);
-                    }, 100); // Ждем 2 секунды перед повтором
-
-                    return;
-                }
-
-                resolve({
-                    statusCode: res.statusCode,
-                    merchantId: merchantId,
-                    success: res.statusCode === 200,
-                    proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
-                    attempt: attempt
-                });
-            });
-        });
-
-        req.on('error', (error) => {
-            // При ошибке сети тоже можем повторить
-            if (attempt < maxAttempts) {
-                console.log(`⚠️ Ошибка сети для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 1 секунду...`);
-
-                setTimeout(() => {
-                    makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts)
-                        .then(resolve)
-                        .catch(resolve);
-                }, 200);
-
-                return;
-            }
-
-            resolve({
-                statusCode: 0,
-                merchantId: merchantId,
-                success: false,
-                error: error.message,
-                proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
-                attempt: attempt
-            });
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-
-            // При таймауте тоже можем повторить
-            if (attempt < maxAttempts) {
-                console.log(`⚠️ Таймаут для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 1 секунду...`);
-
-                setTimeout(() => {
-                    makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts)
-                        .then(resolve)
-                        .catch(resolve);
-                }, 1000);
-
-                return;
-            }
-
-            resolve({
-                statusCode: 0,
-                merchantId: merchantId,
-                success: false,
-                error: 'Timeout',
-                proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
-                attempt: attempt
-            });
-        });
-
-        req.end();
-    });
+        return {
+            statusCode: 0,
+            merchantId: merchantId,
+            success: false,
+            error: error.message,
+            proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
+            attempt: attempt
+        };
+    }
 }
 
 // Функция для записи валидного ID
