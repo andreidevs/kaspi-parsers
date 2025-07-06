@@ -7,7 +7,7 @@ const {HttpProxyAgent} = require('http-proxy-agent');
 // Настройки
 const OUTPUT_FILE = 'valid_merchant_ids.txt';
 const ID_LOG_FILE = 'processed_api_ids.txt';
-const TOTAL_REQUESTS = 10000000;
+const TOTAL_REQUESTS = 10000000000;
 const CONCURRENT_REQUESTS = 50;
 const MIN_ID_LENGTH = 7;
 const MAX_ID_LENGTH = 8;
