@@ -111,10 +111,19 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
             return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
         }
 
+        // Проверяем что ответ успешный и есть данные
+        const hasData = response.status === 200 && 
+                       response.data && 
+                       response.data.data && 
+                       Array.isArray(response.data.data) && 
+                       response.data.data.length > 0;
+
         return {
             statusCode: response.status,
             merchantId: merchantId,
             success: response.status === 200,
+            hasData: hasData,
+            dataLength: response.data?.data?.length || 0,
             proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
             attempt: attempt
         };
@@ -132,6 +141,8 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
             statusCode: 0,
             merchantId: merchantId,
             success: false,
+            hasData: false,
+            dataLength: 0,
             error: error.message,
             proxy: proxyConfig ? `${proxyConfig.host}:${proxyConfig.port}` : 'direct',
             attempt: attempt
@@ -163,8 +174,12 @@ async function processId() {
     try {
         const result = await makeRequest(merchantId, proxyConfig);
 
-        if (result.success) {
+        // Сохраняем только если есть данные (data.length > 0)
+        if (result.hasData) {
             saveValidId(merchantId);
+            console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов`);
+        } else if (result.success) {
+            // console.log(`ℹ️ ID ${merchantId}: ответ 200, но данных нет (${result.dataLength} отзывов)`);
         }
 
         logProcessedId(merchantId);
@@ -177,6 +192,8 @@ async function processId() {
             statusCode: 0,
             merchantId: merchantId,
             success: false,
+            hasData: false,
+            dataLength: 0,
             error: error.message
         };
     }
@@ -188,7 +205,8 @@ async function processId() {
     console.log(`📊 Настройки: ${CONCURRENT_REQUESTS} одновременных запросов, максимум ${TOTAL_REQUESTS} попыток`);
 
     let completedRequests = 0;
-    let foundValidIds = 0;
+    let foundValidIds = 0; // Только с данными (data.length > 0)
+    let emptyResponses = 0; // Ответ 200, но данных нет
     let errors = 0;
 
     // Функция для обработки одного запроса
@@ -198,15 +216,17 @@ async function processId() {
         const result = await processId();
         completedRequests++;
 
-        if (result.success) {
-            foundValidIds++;
+        if (result.hasData) {
+            foundValidIds++; // Только если есть данные
+        } else if (result.success) {
+            emptyResponses++; // Ответ 200, но данных нет
         } else {
             errors++;
         }
 
         // Статистика каждые 100 запросов
         if (completedRequests % 100 === 0) {
-            console.log(`📈 Прогресс: ${completedRequests}/${TOTAL_REQUESTS} | Найдено: ${foundValidIds} | Ошибок: ${errors}`);
+            console.log(`📈 Прогресс: ${completedRequests}/${TOTAL_REQUESTS} | С данными: ${foundValidIds} | Пустые: ${emptyResponses} | Ошибок: ${errors}`);
         }
     }
 
@@ -227,7 +247,8 @@ async function processId() {
     console.log('✅ Парсинг завершён!');
     console.log(`📊 Итоговая статистика:`);
     console.log(`   Всего запросов: ${completedRequests}`);
-    console.log(`   Найдено валидных ID: ${foundValidIds}`);
+    console.log(`   С данными (сохранено): ${foundValidIds}`);
+    console.log(`   Пустые ответы (200, но без данных): ${emptyResponses}`);
     console.log(`   Ошибок: ${errors}`);
     console.log(`   Валидные ID сохранены в: ${OUTPUT_FILE}`);
 })();
