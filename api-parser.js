@@ -232,13 +232,40 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
     }
 }
 
-// Функция для записи валидного ID
-function saveValidId(merchantId, dataLength) {
-    validIdsBatch.push({ merchantId, dataLength });
+// Функция для записи валидного ID сразу в Supabase
+async function saveValidIdToSupabase(merchantId, dataLength) {
+    try {
+        const record = {
+            merchant_id: parseInt(merchantId),
+            data_length: dataLength,
+            found_at: new Date().toISOString()
+        };
 
-    if (validIdsBatch.length >= SUPABASE_BATCH_SIZE) {
-        saveValidIdsBatchToSupabase();
+        const { error } = await supabase
+            .from('generateid_valid')
+            .insert([record]);
+
+        if (error) {
+            console.error(`❌ Ошибка записи ID ${merchantId} в Supabase:`, error.message);
+            // В случае ошибки сохраняем в файл как резерв
+            fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
+            return false;
+        } else {
+            console.log(`💾 ID ${merchantId} сохранен в Supabase (${dataLength} отзывов)`);
+            return true;
+        }
+
+    } catch (error) {
+        console.error(`❌ Критическая ошибка записи ID ${merchantId}:`, error.message);
+        // В случае ошибки сохраняем в файл как резерв
+        fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
+        return false;
     }
+}
+
+// Обновленная функция для записи валидного ID
+async function saveValidId(merchantId, dataLength) {
+    await saveValidIdToSupabase(merchantId, dataLength);
 }
 
 // Функция для записи обработанного ID
@@ -253,17 +280,16 @@ function logProcessedId(merchantId) {
     }
 }
 
-// Основная функция обработки
+// Обновленная основная функция обработки
 async function processId() {
     let merchantId;
     let attempts = 0;
-    const maxAttempts = 100; // Максимум попыток найти неиспользованный ID
+    const maxAttempts = 100;
     
     do {
         merchantId = getRandomId();
         attempts++;
         
-        // Если слишком много попыток, просто используем текущий ID
         if (attempts >= maxAttempts) {
             break;
         }
@@ -274,10 +300,10 @@ async function processId() {
     try {
         const result = await makeRequest(merchantId, proxyConfig);
 
-        // Сохраняем только если есть данные (data.length > 0)
+        // Сразу сохраняем в Supabase если есть данные
         if (result.hasData) {
-            saveValidId(merchantId, result.dataLength);
-            console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов`);
+            await saveValidId(merchantId, result.dataLength);
+            console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов, сохранено в базу`);
         } else if (result.success) {
             // console.log(`ℹ️ ID ${merchantId}: ответ 200, но данных нет (${result.dataLength} отзывов)`);
         }
