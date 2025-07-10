@@ -1,9 +1,13 @@
 const fs = require('fs');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
+
+// Настройки Supabase
+const supabaseUrl = 'https://xnwacziuktpvayhoozlr.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhud2Fjeml1a3RwdmF5aG9vemxyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIxNjUyODgsImV4cCI6MjA2Nzc0MTI4OH0.EJUJg4m3KD8f1KT8Hsz6uXB2PxdpftkhDdfzwYp6vzw';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Настройки
-const OUTPUT_FILE = 'valid_merchant_ids.txt';
-const ID_LOG_FILE = 'processed_api_ids.txt';
 const TOTAL_REQUESTS = 10000000000;
 const CONCURRENT_REQUESTS = 50;
 const MIN_ID_LENGTH = 7;
@@ -33,14 +37,28 @@ const proxyConfigs = [
 
 console.log(`📡 Загружено ${proxyConfigs.length} прокси конфигураций`);
 
-// Чтение уже обработанных ID
+// Загрузка уже обработанных ID из Supabase
 let processedIds = new Set();
-if (fs.existsSync(ID_LOG_FILE)) {
-    const data = fs.readFileSync(ID_LOG_FILE, 'utf-8');
-    data.split('\n').forEach(id => {
-        if (id.trim()) processedIds.add(id.trim());
-    });
-    console.log(`📋 Загружено ${processedIds.size} уже обработанных ID`);
+
+async function loadProcessedIds() {
+    try {
+        const { data, error } = await supabase
+            .from('generateid_processed')
+            .select('merchant_id');
+        
+        if (error) {
+            console.error('Ошибка загрузки обработанных ID:', error);
+            return;
+        }
+
+        data.forEach(row => {
+            processedIds.add(row.merchant_id.toString());
+        });
+
+        console.log(`📋 Загружено ${processedIds.size} уже обработанных ID из Supabase`);
+    } catch (error) {
+        console.error('Ошибка подключения к Supabase:', error);
+    }
 }
 
 // Функция для генерации случайного ID
@@ -83,11 +101,10 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
         },
         timeout: 10000,
         validateStatus: function (status) {
-            return status < 500; // Не выбрасывать ошибку для статусов < 500
+            return status < 500;
         }
     };
 
-    // Добавляем прокси если есть
     if (proxyConfig) {
         config.proxy = {
             protocol: proxyConfig.protocol,
@@ -103,7 +120,6 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
     try {
         const response = await axios(config);
 
-        // Если получили 429 (Too Many Requests) и есть попытки
         if (response.status === 429 && attempt < maxAttempts) {
             console.log(`⚠️ 429 ошибка для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 100мс...`);
             
@@ -111,7 +127,6 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
             return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
         }
 
-        // Проверяем что ответ успешный и есть данные
         const hasData = response.status === 200 && 
                        response.data && 
                        response.data.data && 
@@ -129,7 +144,6 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
         };
 
     } catch (error) {
-        // При ошибке сети тоже можем повторить
         if (attempt < maxAttempts && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND')) {
             console.log(`⚠️ Ошибка сети для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 200мс...`);
             
@@ -150,19 +164,53 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
     }
 }
 
-// Функция для записи валидного ID
-function saveValidId(merchantId) {
-    fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
-    console.log(`✅ Найден валидный ID: ${merchantId}`);
+// Функция для сохранения валидного ID в Supabase
+async function saveValidId(merchantId, dataLength) {
+    try {
+        const { error } = await supabase
+            .from('generateid_valid')
+            .insert([
+                {
+                    merchant_id: merchantId,
+                    data_length: dataLength,
+                    found_at: new Date().toISOString()
+                }
+            ]);
+
+        if (error) {
+            console.error(`❌ Ошибка сохранения валидного ID ${merchantId}:`, error);
+        } else {
+            console.log(`✅ Найден валидный ID: ${merchantId} (${dataLength} отзывов)`);
+        }
+    } catch (error) {
+        console.error(`❌ Ошибка сохранения в Supabase для ID ${merchantId}:`, error);
+    }
 }
 
-// Функция для записи обработанного ID
-function logProcessedId(merchantId) {
-    fs.appendFileSync(ID_LOG_FILE, `${merchantId}\n`);
-    processedIds.add(merchantId.toString());
+// Упрощенная функция для записи обработанного ID
+async function logProcessedId(merchantId) {
+    try {
+        const { error: dbError } = await supabase
+            .from('generateid_processed')
+            .insert([
+                {
+                    merchant_id: merchantId,
+                    processed_at: new Date().toISOString()
+                }
+            ]);
+
+        if (dbError) {
+            console.error(`❌ Ошибка записи обработанного ID ${merchantId}:`, dbError);
+        }
+        
+        processedIds.add(merchantId.toString());
+    } catch (error) {
+        console.error(`❌ Ошибка записи в Supabase для ID ${merchantId}:`, error);
+        processedIds.add(merchantId.toString());
+    }
 }
 
-// Основная функция обработки
+// Функция для обработки
 async function processId() {
     let merchantId;
     do {
@@ -176,18 +224,18 @@ async function processId() {
 
         // Сохраняем только если есть данные (data.length > 0)
         if (result.hasData) {
-            saveValidId(merchantId);
-            console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов`);
-        } else if (result.success) {
-            // console.log(`ℹ️ ID ${merchantId}: ответ 200, но данных нет (${result.dataLength} отзывов)`);
+            await saveValidId(merchantId, result.dataLength);
         }
 
-        logProcessedId(merchantId);
+        await logProcessedId(merchantId);
+
         return result;
 
     } catch (error) {
         console.error(`❌ Ошибка при обработке ID ${merchantId}:`, error.message);
-        logProcessedId(merchantId);
+        
+        await logProcessedId(merchantId);
+
         return {
             statusCode: 0,
             merchantId: merchantId,
@@ -202,6 +250,11 @@ async function processId() {
 // Главная функция
 (async () => {
     console.log('🚀 Запуск API парсера...');
+    console.log('📡 Подключение к Supabase...');
+    
+    // Загружаем уже обработанные ID
+    await loadProcessedIds();
+    
     console.log(`📊 Настройки: ${CONCURRENT_REQUESTS} одновременных запросов, максимум ${TOTAL_REQUESTS} попыток`);
 
     let completedRequests = 0;
