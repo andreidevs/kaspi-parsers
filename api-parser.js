@@ -1,5 +1,11 @@
 const fs = require('fs');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js');
+
+// Настройки Supabase
+const supabaseUrl = 'https://xnwacziuktpvayhoozlr.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhud2Fjeml1a3RwdmF5aG9vemxyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTIxNjUyODgsImV4cCI6MjA2Nzc0MTI4OH0.EJUJg4m3KD8f1KT8Hsz6uXB2PxdpftkhDdfzwYp6vzw';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Настройки
 const OUTPUT_FILE = 'valid_merchant_ids.txt';
@@ -10,6 +16,7 @@ const MIN_ID_LENGTH = 7;
 const MAX_ID_LENGTH = 8;
 const MAX_SET_SIZE = 1000000; // Максимальный размер Set в памяти
 const CLEANUP_INTERVAL = 100000; // Очищать Set каждые 100k записей
+const SUPABASE_BATCH_SIZE = 100; // Размер батча для Supabase
 
 // Массив User-Agent
 const userAgents = [
@@ -38,6 +45,9 @@ console.log(`📡 Загружено ${proxyConfigs.length} прокси кон�
 // Чтение уже обработанных ID (только последние для экономии памяти)
 let processedIds = new Set();
 let totalProcessedCount = 0;
+
+// Буфер для батчевой записи в Supabase
+let validIdsBatch = [];
 
 function loadRecentProcessedIds() {
     if (fs.existsSync(ID_LOG_FILE)) {
@@ -93,6 +103,44 @@ function isIdProcessed(merchantId) {
     // Если в памяти нет и файл большой, делаем вероятностную проверку
     // (принимаем небольшой риск дублирования для экономии памяти)
     return false;
+}
+
+// Функция для записи валидных ID в Supabase батчами
+async function saveValidIdsBatchToSupabase() {
+    if (validIdsBatch.length === 0) return;
+
+    try {
+        const records = validIdsBatch.map(item => ({
+            merchant_id: parseInt(item.merchantId),
+            data_length: item.dataLength,
+            found_at: new Date().toISOString()
+        }));
+
+        const { error } = await supabase
+            .from('generateid_valid')
+            .insert(records);
+
+        if (error) {
+            console.error('❌ Ошибка записи в Supabase:', error.message);
+            // В случае ошибки сохраняем в файл как резерв
+            validIdsBatch.forEach(item => {
+                fs.appendFileSync(OUTPUT_FILE, `${item.merchantId}\n`);
+            });
+        } else {
+            console.log(`💾 Сохранено ${records.length} валидных ID в Supabase`);
+        }
+
+        // Очищаем батч
+        validIdsBatch = [];
+
+    } catch (error) {
+        console.error('❌ Критическая ошибка Supabase:', error.message);
+        // В случае ошибки сохраняем в файл как резерв
+        validIdsBatch.forEach(item => {
+            fs.appendFileSync(OUTPUT_FILE, `${item.merchantId}\n`);
+        });
+        validIdsBatch = [];
+    }
 }
 
 // Функция для выполнения HTTP запроса с повторными попытками
@@ -185,9 +233,12 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
 }
 
 // Функция для записи валидного ID
-function saveValidId(merchantId) {
-    fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
-    console.log(`✅ Найден валидный ID: ${merchantId}`);
+function saveValidId(merchantId, dataLength) {
+    validIdsBatch.push({ merchantId, dataLength });
+
+    if (validIdsBatch.length >= SUPABASE_BATCH_SIZE) {
+        saveValidIdsBatchToSupabase();
+    }
 }
 
 // Функция для записи обработанного ID
@@ -225,7 +276,7 @@ async function processId() {
 
         // Сохраняем только если есть данные (data.length > 0)
         if (result.hasData) {
-            saveValidId(merchantId);
+            saveValidId(merchantId, result.dataLength);
             console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов`);
         } else if (result.success) {
             // console.log(`ℹ️ ID ${merchantId}: ответ 200, но данных нет (${result.dataLength} отзывов)`);
@@ -293,6 +344,9 @@ async function processId() {
     }
 
     await Promise.all(promises);
+
+    // Сохраняем оставшиеся валидные ID
+    await saveValidIdsBatchToSupabase();
 
     console.log('✅ Парсинг завершён!');
     console.log(`📊 Итоговая статистика:`);
