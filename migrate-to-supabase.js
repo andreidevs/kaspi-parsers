@@ -190,12 +190,12 @@ async function checkTablesExist() {
     console.log('═'.repeat(60));
     
     // Мигрируем валидные ID
-    // await migrateValidIds();
+    await migrateValidIds();
     
-    console.log('═'.repeat(60));
-    
-    // Мигрируем обработанные ID
-    await migrateProcessedIds();
+    // console.log('═'.repeat(60));
+    //
+    // // Мигрируем обработанные ID
+    // await migrateProcessedIds();
     
     console.log('═'.repeat(60));
     console.log('✅ Миграция завершена!');

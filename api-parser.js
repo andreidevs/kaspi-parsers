@@ -8,6 +8,8 @@ const TOTAL_REQUESTS = 10000000000;
 const CONCURRENT_REQUESTS = 50;
 const MIN_ID_LENGTH = 7;
 const MAX_ID_LENGTH = 8;
+const MAX_SET_SIZE = 1000000; // Максимальный размер Set в памяти
+const CLEANUP_INTERVAL = 100000; // Очищать Set каждые 100k записей
 
 // Массив User-Agent
 const userAgents = [
@@ -33,14 +35,34 @@ const proxyConfigs = [
 
 console.log(`📡 Загружено ${proxyConfigs.length} прокси конфигураций`);
 
-// Чтение уже обработанных ID
+// Чтение уже обработанных ID (только последние для экономии памяти)
 let processedIds = new Set();
-if (fs.existsSync(ID_LOG_FILE)) {
-    const data = fs.readFileSync(ID_LOG_FILE, 'utf-8');
-    data.split('\n').forEach(id => {
-        if (id.trim()) processedIds.add(id.trim());
-    });
-    console.log(`📋 Загружено ${processedIds.size} уже обработанных ID`);
+let totalProcessedCount = 0;
+
+function loadRecentProcessedIds() {
+    if (fs.existsSync(ID_LOG_FILE)) {
+        const data = fs.readFileSync(ID_LOG_FILE, 'utf-8');
+        const lines = data.split('\n').filter(line => line.trim());
+        totalProcessedCount = lines.length;
+        
+        // Загружаем только последние MAX_SET_SIZE записей для экономии памяти
+        const recentLines = lines.slice(-MAX_SET_SIZE);
+        processedIds = new Set(recentLines);
+        
+        console.log(`📋 Всего обработано: ${totalProcessedCount}, в памяти: ${processedIds.size} ID`);
+    }
+}
+
+loadRecentProcessedIds();
+
+// Функция для очистки Set при превышении лимита
+function cleanupProcessedIds() {
+    if (processedIds.size >= MAX_SET_SIZE) {
+        console.log(`🧹 Очистка памяти: Set достиг ${processedIds.size} элементов`);
+        processedIds.clear();
+        // Перезагружаем только последние записи
+        loadRecentProcessedIds();
+    }
 }
 
 // Функция для генерации случайного ID
@@ -59,6 +81,18 @@ function getRandomUserAgent() {
 function getRandomProxy() {
     if (proxyConfigs.length === 0) return null;
     return proxyConfigs[Math.floor(Math.random() * proxyConfigs.length)];
+}
+
+// Функция для проверки, был ли ID уже обработан (более эффективная проверка)
+function isIdProcessed(merchantId) {
+    // Сначала проверяем в памяти
+    if (processedIds.has(merchantId.toString())) {
+        return true;
+    }
+    
+    // Если в памяти нет и файл большой, делаем вероятностную проверку
+    // (принимаем небольшой риск дублирования для экономии памяти)
+    return false;
 }
 
 // Функция для выполнения HTTP запроса с повторными попытками
@@ -83,7 +117,7 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
         },
         timeout: 10000,
         validateStatus: function (status) {
-            return status < 500; // Не выбрасывать ошибку для статусов < 500
+            return status < 500;
         }
     };
 
@@ -160,14 +194,29 @@ function saveValidId(merchantId) {
 function logProcessedId(merchantId) {
     fs.appendFileSync(ID_LOG_FILE, `${merchantId}\n`);
     processedIds.add(merchantId.toString());
+    totalProcessedCount++;
+    
+    // Периодическая очистка памяти
+    if (totalProcessedCount % CLEANUP_INTERVAL === 0) {
+        cleanupProcessedIds();
+    }
 }
 
 // Основная функция обработки
 async function processId() {
     let merchantId;
+    let attempts = 0;
+    const maxAttempts = 100; // Максимум попыток найти неиспользованный ID
+    
     do {
         merchantId = getRandomId();
-    } while (processedIds.has(merchantId.toString()));
+        attempts++;
+        
+        // Если слишком много попыток, просто используем текущий ID
+        if (attempts >= maxAttempts) {
+            break;
+        }
+    } while (isIdProcessed(merchantId));
 
     const proxyConfig = getRandomProxy();
 
@@ -203,10 +252,11 @@ async function processId() {
 (async () => {
     console.log('🚀 Запуск API парсера...');
     console.log(`📊 Настройки: ${CONCURRENT_REQUESTS} одновременных запросов, максимум ${TOTAL_REQUESTS} попыток`);
+    console.log(`🧠 Память: максимум ${MAX_SET_SIZE} ID в памяти, очистка каждые ${CLEANUP_INTERVAL} записей`);
 
     let completedRequests = 0;
-    let foundValidIds = 0; // Только с данными (data.length > 0)
-    let emptyResponses = 0; // Ответ 200, но данных нет
+    let foundValidIds = 0;
+    let emptyResponses = 0;
     let errors = 0;
 
     // Функция для обработки одного запроса
@@ -217,16 +267,16 @@ async function processId() {
         completedRequests++;
 
         if (result.hasData) {
-            foundValidIds++; // Только если есть данные
+            foundValidIds++;
         } else if (result.success) {
-            emptyResponses++; // Ответ 200, но данных нет
+            emptyResponses++;
         } else {
             errors++;
         }
 
         // Статистика каждые 100 запросов
         if (completedRequests % 100 === 0) {
-            console.log(`📈 Прогресс: ${completedRequests}/${TOTAL_REQUESTS} | С данными: ${foundValidIds} | Пустые: ${emptyResponses} | Ошибок: ${errors}`);
+            console.log(`📈 Прогресс: ${completedRequests}/${TOTAL_REQUESTS} | С данными: ${foundValidIds} | Пустые: ${emptyResponses} | Ошибок: ${errors} | В памяти: ${processedIds.size} ID`);
         }
     }
 
