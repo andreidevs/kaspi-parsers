@@ -22,15 +22,33 @@ const mobileUserAgents = [
     'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Mobile Safari/537.36'
 ];
 
+// Прокси конфигурация
+const proxyConfigs = [
+    {
+        protocol: 'http',
+        host: 'brd.superproxy.io',
+        port: 22225,
+        auth: {
+            username: 'brd-customer-hl_488f646c-zone-isp_proxy1',
+            password: '4nqz088zgsve',
+        }
+    }
+];
+
 // Функция для получения случайного мобильного User-Agent
 function getRandomMobileUserAgent() {
     return mobileUserAgents[Math.floor(Math.random() * mobileUserAgents.length)];
 }
 
+// Функция для получения случайного прокси
+function getRandomProxy() {
+    if (proxyConfigs.length === 0) return null;
+    return proxyConfigs[Math.floor(Math.random() * proxyConfigs.length)];
+}
+
 // Настройки
 const ID_LOG_FILE = 'processed_merchant_ids.txt';
 let TOTAL_REQUESTS = 1000000; // Значение по умолчанию
-const SAVE_INTERVAL = 60000;
 const CONCURRENT_PAGES = 10;
 const BATCH_SIZE = 1000; // Размер батча для получения ID из Supabase
 
@@ -64,14 +82,14 @@ if (fs.existsSync(ID_LOG_FILE)) {
     });
 }
 
-// Функция для получения валидных ID из Supabase
-async function getValidMerchantIds(limit = BATCH_SIZE) {
+// Функция для получения валидных ID из Supabase с пагинацией
+async function getValidMerchantIds(limit = BATCH_SIZE, offset = 0) {
     try {
         const { data, error } = await supabase
             .from('generateid_valid')
             .select('merchant_id')
             .order('found_at', { ascending: false })
-            .limit(limit);
+            .range(offset, offset + limit - 1);
 
         if (error) {
             console.error('❌ Ошибка получения ID из Supabase:', error.message);
@@ -85,7 +103,7 @@ async function getValidMerchantIds(limit = BATCH_SIZE) {
     }
 }
 
-// Функция для сохранения результата в Supabase
+// Функция для сохранения результата в Supabase с использованием upsert
 async function saveMerchantDataToSupabase(merchantData) {
     try {
         const record = {
@@ -101,20 +119,24 @@ async function saveMerchantDataToSupabase(merchantData) {
             parsed_at: new Date().toISOString()
         };
 
+        // Используем upsert для автоматической вставки или обновления
         const { error } = await supabase
             .from('merchant_details')
-            .insert([record]);
+            .upsert([record], { 
+                onConflict: 'merchant_id',
+                ignoreDuplicates: false 
+            });
 
         if (error) {
-            console.error(`❌ Ошибка сохранения данных для ID ${merchantData.ID}:`, error.message);
+            console.error(`❌ Ошибка upsert данных для ID ${merchantData.ID}:`, error.message);
             return false;
         } else {
-            console.log(`💾 Данные для ID ${merchantData.ID} сохранены в Supabase`);
+            console.log(`💾 Данные для ID ${merchantData.ID} сохранены/обновлены в Supabase`);
             return true;
         }
 
     } catch (error) {
-        console.error(`❌ Критическая ошибка сохранения ID ${merchantData.ID}:`, error.message);
+        console.error(`❌ Критическая ошибка upsert ID ${merchantData.ID}:`, error.message);
         return false;
     }
 }
@@ -333,8 +355,16 @@ function logProcessedId(id) {
             '--no-first-run',
             '--no-zygote',
             '--disable-gpu',
-            '--disable-blink-features=AutomationControlled'
+            '--disable-blink-features=AutomationControlled',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor'
         ]
+    });
+
+    // Обработка ошибок браузера
+    browser.on('disconnected', () => {
+        console.error('❌ Браузер отключился неожиданно');
+        process.exit(1);
     });
 
     let completedRequests = 0;
@@ -342,14 +372,15 @@ function logProcessedId(id) {
     let skippedMerchants = 0;
     let merchantIds = [];
     let currentIndex = 0;
+    let currentOffset = 0; // Добавляем переменную для отслеживания смещения
 
     // Функция для загрузки новой порции ID
     async function loadMerchantIds() {
-        console.log('📥 Загружаем новую порцию валидных ID из Supabase...');
-        const newIds = await getValidMerchantIds(BATCH_SIZE);
+        console.log(`📥 Загружаем новую порцию валидных ID из Supabase (offset: ${currentOffset})...`);
+        const newIds = await getValidMerchantIds(BATCH_SIZE, currentOffset);
         
         if (newIds.length === 0) {
-            console.log('⚠️ Не удалось получить новые ID из Supabase');
+            console.log('⚠️ Не удалось получить новые ID из Supabase или достигнут конец данных');
             return false;
         }
 
@@ -357,14 +388,17 @@ function logProcessedId(id) {
         const unprocessedIds = newIds.filter(id => !processedIds.has(id.toString()));
         merchantIds.push(...unprocessedIds);
         
-        console.log(`✅ Загружено ${newIds.length} ID, из них ${unprocessedIds.length} новых`);
+        // Увеличиваем смещение для следующего запроса
+        currentOffset += BATCH_SIZE;
+        
+        console.log(`✅ Загружено ${newIds.length} ID, из них ${unprocessedIds.length} новых (offset: ${currentOffset})`);
         return true;
     }
 
     // Загружаем первую порцию ID
     await loadMerchantIds();
 
-    // Функция для обработки одного ID
+    // Функция для обработки одного ID с повторными попытками
     async function processId() {
         if (completedRequests >= TOTAL_REQUESTS) return;
 
@@ -380,58 +414,110 @@ function logProcessedId(id) {
         const merchantId = merchantIds[currentIndex++];
         if (!merchantId) return;
 
-        const page = await browser.newPage();
+        let page = null;
+        let attempts = 0;
+        const maxAttempts = 3;
 
-        try {
-            // Скрываем признаки автоматизации
-            await page.evaluateOnNewDocument(() => {
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                });
-            });
-
-            // Установка случайного мобильного User-Agent
-            const mobileUA = getRandomMobileUserAgent();
-            await page.setUserAgent(mobileUA);
-
-            // Отключение ненужных ресурсов
-            await page.setRequestInterception(true);
-            page.on('request', req => {
-                if (['image', 'font', 'media'].includes(req.resourceType())) {
-                    req.abort();
+        while (attempts < maxAttempts) {
+            try {
+                const proxy = getRandomProxy();
+                if (proxy) {
+                    page = await browser.newPage({
+                        args: [
+                            `--proxy-server=${proxy.protocol}://${proxy.host}:${proxy.port}`
+                        ]
+                    });
+                    await page.authenticate(proxy.auth);
                 } else {
-                    req.continue();
+                    page = await browser.newPage();
                 }
-            });
 
-            const result = await parseMerchantPage(page, merchantId);
+                // Скрываем признаки автоматизации
+                await page.evaluateOnNewDocument(() => {
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined,
+                    });
+                });
 
-            if (result && result.title) {
-                // Сохраняем в Supabase вместо Excel
-                const saved = await saveMerchantDataToSupabase(result);
-                if (saved) {
-                    foundMerchants++;
-                    console.log(`✅ Добавлено: ${result.title} (ID: ${merchantId})`);
+                // Установка случайного мобильного User-Agent
+                const mobileUA = getRandomMobileUserAgent();
+                await page.setUserAgent(mobileUA);
+
+                // Отключение ненужных ресурсов
+                await page.setRequestInterception(true);
+                page.on('request', req => {
+                    if (['image', 'font', 'media'].includes(req.resourceType())) {
+                        req.abort();
+                    } else {
+                        req.continue();
+                    }
+                });
+
+                const result = await parseMerchantPage(page, merchantId);
+
+                if (result && result.title) {
+                    // Сохраняем в Supabase вместо Excel
+                    const saved = await saveMerchantDataToSupabase(result); // Используем upsert
+                    if (saved) {
+                        foundMerchants++;
+                        console.log(`✅ Добавлено: ${result.title} (ID: ${merchantId})`);
+                    }
+                } else {
+                    skippedMerchants++;
                 }
-            } else {
-                skippedMerchants++;
+
+                // Выводим статистику каждые 10 запросов
+                if ((completedRequests + 1) % 10 === 0) {
+                    console.log(`📊 Статистика: Найдено ${foundMerchants}, Пропущено ${skippedMerchants}, Всего обработано ${completedRequests + 1}/${TOTAL_REQUESTS}`);
+                    console.log('─'.repeat(50));
+                }
+
+                logProcessedId(merchantId);
+                completedRequests++;
+                break; // Успешно обработано, выходим из цикла
+
+            } catch (error) {
+                attempts++;
+                console.error(`💥 Ошибка при обработке ID ${merchantId} (попытка ${attempts}/${maxAttempts}):`, error.message);
+                
+                // Если это ошибка соединения и есть еще попытки
+                if (error.message.includes('Connection closed') || error.message.includes('Protocol error')) {
+                    console.log(`🔄 Переподключение для ID ${merchantId}...`);
+                    
+                    // Закрываем страницу если она существует
+                    if (page && !page.isClosed()) {
+                        try {
+                            await page.close();
+                        } catch (closeError) {
+                            console.error('Ошибка при закрытии страницы:', closeError.message);
+                        }
+                    }
+                    
+                    // Пауза перед повторной попыткой
+                    await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
+                    
+                    if (attempts >= maxAttempts) {
+                        console.error(`❌ Превышено максимальное количество попыток для ID ${merchantId}`);
+                        logProcessedId(merchantId);
+                        completedRequests++;
+                    }
+                } else {
+                    // Для других ошибок не повторяем
+                    console.error(`❌ Критическая ошибка для ID ${merchantId}:`, error.message);
+                    logProcessedId(merchantId);
+                    completedRequests++;
+                    break;
+                }
+            } finally {
+                // Закрываем страницу если она существует и не закрыта
+                if (page && !page.isClosed()) {
+                    try {
+                        await page.close();
+                    } catch (closeError) {
+                        console.error('Ошибка при закрытии страницы в finally:', closeError.message);
+                    }
+                }
             }
-
-            // Выводим статистику каждые 10 запросов
-            if ((completedRequests + 1) % 10 === 0) {
-                console.log(`📊 Статистика: Найдено ${foundMerchants}, Пропущено ${skippedMerchants}, Всего обработано ${completedRequests + 1}/${TOTAL_REQUESTS}`);
-                console.log('─'.repeat(50));
-            }
-
-            logProcessedId(merchantId);
-            completedRequests++;
-
-        } catch (error) {
-            console.error(`💥 Ошибка при обработке ID ${merchantId}:`, error.message);
-            logProcessedId(merchantId);
-            completedRequests++;
-        } finally {
-            await page.close();
         }
     }
 
