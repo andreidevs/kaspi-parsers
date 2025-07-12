@@ -343,7 +343,7 @@ function logProcessedId(id) {
             '--disable-features=VizDisplayCompositor',
             '--single-process'
         ],
-        executablePath: process.platform === 'linux' ? '/usr/bin/chromium-browser' : undefined
+        // executablePath: process.platform === 'linux' ? '/usr/bin/chromium-browser' : undefined
     });
 
     let completedRequests = 0;
