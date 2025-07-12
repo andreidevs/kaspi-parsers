@@ -312,10 +312,29 @@ function logProcessedId(id) {
     processedIds.add(id.toString());
 }
 
+// Проверка доступности Chrome на Linux
+async function checkChromeAvailability() {
+    if (process.platform === 'linux') {
+        const { execSync } = require('child_process');
+        try {
+            execSync('which google-chrome-stable', { stdio: 'ignore' });
+            console.log('✅ Google Chrome найден');
+        } catch (error) {
+            console.log('❌ Google Chrome не найден. Установите его:');
+            console.log('sudo apt-get update');
+            console.log('sudo apt-get install -y google-chrome-stable');
+            process.exit(1);
+        }
+    }
+}
+
 // Основной цикл
 (async () => {
     console.log('🚀 Запуск парсера с подключением к Supabase...');
-
+    
+    // Проверяем доступность Chrome
+    await checkChromeAvailability();
+    
     // Получаем общее количество валидных ID из базы
     TOTAL_REQUESTS = await getTotalValidMerchantIds();
     console.log(`🎯 Установлено максимальное количество запросов: ${TOTAL_REQUESTS}`);
@@ -330,8 +349,17 @@ function logProcessedId(id) {
             '--no-first-run',
             '--no-zygote',
             '--disable-gpu',
-            '--disable-blink-features=AutomationControlled'
-        ]
+            '--disable-blink-features=AutomationControlled',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--disable-features=TranslateUI',
+            '--disable-ipc-flooding-protection',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--single-process'
+        ],
+        executablePath: process.platform === 'linux' ? '/usr/bin/google-chrome-stable' : undefined
     });
 
     let completedRequests = 0;
