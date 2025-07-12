@@ -28,7 +28,7 @@ function getRandomMobileUserAgent() {
 }
 
 // Настройки
-const ID_LOG_FILE = 'processed_ids.txt';
+const ID_LOG_FILE = 'processed_merchant_ids.txt';
 let TOTAL_REQUESTS = 1000000; // Значение по умолчанию
 const SAVE_INTERVAL = 60000;
 const CONCURRENT_PAGES = 10;
