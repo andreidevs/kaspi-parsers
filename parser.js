@@ -324,16 +324,13 @@ function logProcessedId(id) {
     console.log(`🎯 Установлено максимальное количество запросов: ${TOTAL_REQUESTS}`);
 
     const browser = await puppeteer.launch({
-        headless: true,
+        headless: 'new', // Используем новый headless режим
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
             '--disable-gpu',
-            '--disable-blink-features=AutomationControlled',
+            '--disable-software-rasterizer',
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
@@ -341,9 +338,12 @@ function logProcessedId(id) {
             '--disable-ipc-flooding-protection',
             '--disable-web-security',
             '--disable-features=VizDisplayCompositor',
-            '--single-process'
-        ],
-        // executablePath: process.platform === 'linux' ? '/usr/bin/chromium-browser' : undefined
+            '--disable-extensions',
+            '--disable-plugins',
+            '--disable-default-apps',
+            '--no-first-run',
+            '--no-zygote'
+        ]
     });
 
     let completedRequests = 0;
