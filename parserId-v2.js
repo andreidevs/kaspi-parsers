@@ -69,10 +69,14 @@ async function saveBatchToSupabase(merchantIds, category, sourceUrl) {
             return true;
         }
 
+        // Обрезаем длинные поля до допустимых размеров (255 символов)
+        const truncatedCategory = category ? category.substring(0, 255) : null;
+        const truncatedSourceUrl = sourceUrl ? sourceUrl.substring(0, 255) : null;
+
         const records = newMerchantIds.map(id => ({
-            merchant_id: id,
-            category: category,
-            source_url: sourceUrl,
+            merchant_id: id.toString(),
+            category: truncatedCategory,
+            source_url: truncatedSourceUrl,
             found_at: new Date().toISOString()
         }));
 
@@ -83,9 +87,21 @@ async function saveBatchToSupabase(merchantIds, category, sourceUrl) {
 
         if (error) {
             console.error('❌ Ошибка вставки батча в Supabase:', error.message);
+            console.error('❌ Детали ошибки:', error);
+            
+            // Логируем проблемные записи для отладки
+            console.log('🔍 Проблемные записи:');
+            records.forEach((record, index) => {
+                console.log(`Record ${index}:`, {
+                    merchant_id_length: record.merchant_id?.length || 0,
+                    category_length: record.category?.length || 0,
+                    source_url_length: record.source_url?.length || 0
+                });
+            });
+            
             return false;
         } else {
-            console.log(`💾 Батч из ${records.length} новых ID сохранен в Supabase для категории: ${category}`);
+            console.log(`💾 Батч из ${records.length} новых ID сохранен в Supabase для категории: ${truncatedCategory}`);
             console.log(`📋 Новые ID: ${newMerchantIds.join(', ')}`);
             if (existingMerchantIds.size > 0) {
                 console.log(`🔄 Пропущено ${uniqueMerchantIds.length - newMerchantIds.length} уже существующих ID`);
@@ -719,7 +735,7 @@ async function parseMerchantIds() {
             const links = document.querySelectorAll('.nav__item-link');
             const result = [];
             
-            for (let i = 3; i < links.length; i++) {
+            for (let i = 4; i < links.length; i++) {
                 const link = links[i];
                 const text = link.innerText.trim();
                 let href = link.getAttribute('href');
