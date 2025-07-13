@@ -644,7 +644,7 @@ async function parseMerchantIds() {
     console.log('🚀 Запуск рекурсивного парсера merchant ID v2...');
 
     const browser = await puppeteer.launch({
-        headless: false,
+        headless: true,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -719,7 +719,7 @@ async function parseMerchantIds() {
             const links = document.querySelectorAll('.nav__item-link');
             const result = [];
             
-            for (let i = 4; i < links.length; i++) {
+            for (let i = 3; i < links.length; i++) {
                 const link = links[i];
                 const text = link.innerText.trim();
                 let href = link.getAttribute('href');

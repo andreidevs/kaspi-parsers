@@ -333,13 +333,6 @@ async function parseMerchantPage(page, merchantId) {
 // Функция для сохранения результата в Supabase с использованием upsert
 async function saveMerchantDataToSupabase(merchantData) {
     try {
-        // Отладочная информация
-        console.log(`🔍 Отладка merchantData для ID:`, {
-            ID: merchantData.ID,
-            title: merchantData.title,
-            typeOfID: typeof merchantData.ID
-        });
-
         // Строгая валидация merchant_id
         if (merchantData.ID === null || merchantData.ID === undefined || merchantData.ID === '') {
             console.log(`⚠️ Пропускаем запись с null/undefined/empty merchant_id:`, merchantData);
@@ -381,7 +374,6 @@ async function saveMerchantDataToSupabase(merchantData) {
 
         if (error) {
             console.error(`❌ Ошибка upsert данных для ID ${merchantData.ID}:`, error.message);
-            console.error(`❌ Данные записи:`, record);
             return false;
         } else {
             console.log(`💾 Данные для ID ${merchantData.ID} сохранены/обновлены в Supabase`);
@@ -390,7 +382,6 @@ async function saveMerchantDataToSupabase(merchantData) {
 
     } catch (error) {
         console.error(`❌ Критическая ошибка upsert ID ${merchantData.ID}:`, error.message);
-        console.error(`❌ merchantData:`, merchantData);
         return false;
     }
 }
