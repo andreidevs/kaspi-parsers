@@ -3,6 +3,7 @@ const path = require('path');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
+const readline = require('readline');
 
 const { createClient } = require('@supabase/supabase-js');
 
@@ -52,23 +53,83 @@ let TOTAL_REQUESTS = 1000000; // Значение по умолчанию
 const CONCURRENT_PAGES = 10;
 const BATCH_SIZE = 1000; // Размер батча для получения ID из Supabase
 
-// Функция для получения общего количества валидных ID из Supabase
-async function getTotalValidMerchantIds() {
+// Добавляем функцию для выбора таблицы
+async function selectSourceTable() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    return new Promise((resolve) => {
+        console.log('\n📋 Выберите источник merchant ID:');
+        console.log('1. generateid_valid (валидные ID с отзывами)');
+        console.log('2. searched_id (найденные ID по категориям)');
+        
+        rl.question('\nВведите номер (1 или 2): ', (answer) => {
+            rl.close();
+            
+            if (answer === '1') {
+                console.log('✅ Выбрана таблица: generateid_valid');
+                resolve('generateid_valid');
+            } else if (answer === '2') {
+                console.log('✅ Выбрана таблица: searched_id');
+                resolve('searched_id');
+            } else {
+                console.log('⚠️ Неверный выбор, используется таблица по умолчанию: generateid_valid');
+                resolve('generateid_valid');
+            }
+        });
+    });
+}
+
+// Функция для получения общего количества ID из выбранной таблицы
+async function getTotalMerchantIds(tableName) {
     try {
         const { count, error } = await supabase
-            .from('generateid_valid')
+            .from(tableName)
             .select('*', { count: 'exact', head: true });
 
         if (error) {
-            console.error('❌ Ошибка получения количества ID из Supabase:', error.message);
+            console.error(`❌ Ошибка получения количества ID из таблицы ${tableName}:`, error.message);
             return 1000000; // Возвращаем значение по умолчанию
         }
 
-        console.log(`📊 Найдено ${count} валидных ID в базе данных`);
+        console.log(`📊 Найдено ${count} ID в таблице ${tableName}`);
         return count || 1000000;
     } catch (error) {
         console.error('❌ Критическая ошибка получения количества ID:', error.message);
         return 1000000; // Возвращаем значение по умолчанию
+    }
+}
+
+// Обновленная функция для получения ID из выбранной таблицы
+async function getMerchantIds(tableName, limit = BATCH_SIZE, offset = 0) {
+    try {
+        let query;
+        
+        if (tableName === 'generateid_valid') {
+            query = supabase
+                .from(tableName)
+                .select('merchant_id')
+                .order('found_at', { ascending: false });
+        } else if (tableName === 'searched_id') {
+            query = supabase
+                .from(tableName)
+                .select('merchant_id')
+                .order('found_at', { ascending: false });
+        }
+
+        const { data, error } = await query.range(offset, offset + limit - 1);
+
+        if (error) {
+            console.error(`❌ Ошибка получения ID из таблицы ${tableName}:`, error.message);
+            return [];
+        }
+
+        return data.map(item => item.merchant_id);
+    } catch (error) {
+        console.error('❌ Критическая ошибка получения ID:', error.message);
+        return [];
     }
 }
 
@@ -80,65 +141,6 @@ if (fs.existsSync(ID_LOG_FILE)) {
     data.split('\n').forEach(id => {
         if (id.trim()) processedIds.add(id.trim());
     });
-}
-
-// Функция для получения валидных ID из Supabase с пагинацией
-async function getValidMerchantIds(limit = BATCH_SIZE, offset = 0) {
-    try {
-        const { data, error } = await supabase
-            .from('generateid_valid')
-            .select('merchant_id')
-            .order('found_at', { ascending: false })
-            .range(offset, offset + limit - 1);
-
-        if (error) {
-            console.error('❌ Ошибка получения ID из Supabase:', error.message);
-            return [];
-        }
-
-        return data.map(item => item.merchant_id);
-    } catch (error) {
-        console.error('❌ Критическая ошибка получения ID:', error.message);
-        return [];
-    }
-}
-
-// Функция для сохранения результата в Supabase с использованием upsert
-async function saveMerchantDataToSupabase(merchantData) {
-    try {
-        const record = {
-            merchant_id: parseInt(merchantData.ID),
-            title: merchantData.title,
-            phone: merchantData.phone,
-            register_date: merchantData.registerDate,
-            reviews_count: merchantData.reviews ? parseInt(merchantData.reviews) : null,
-            rating: merchantData.rating ? parseFloat(merchantData.rating) : null,
-            rating_quantity: merchantData.ratingQuantity ? parseInt(merchantData.ratingQuantity) : null,
-            products_count: merchantData.productsCount ? parseInt(merchantData.productsCount) : null,
-            categories: merchantData.categories && merchantData.categories.length > 0 ? merchantData.categories : null,
-            parsed_at: new Date().toISOString()
-        };
-
-        // Используем upsert для автоматической вставки или обновления
-        const { error } = await supabase
-            .from('merchant_details')
-            .upsert([record], { 
-                onConflict: 'merchant_id',
-                ignoreDuplicates: false 
-            });
-
-        if (error) {
-            console.error(`❌ Ошибка upsert данных для ID ${merchantData.ID}:`, error.message);
-            return false;
-        } else {
-            console.log(`💾 Данные для ID ${merchantData.ID} сохранены/обновлены в Supabase`);
-            return true;
-        }
-
-    } catch (error) {
-        console.error(`❌ Критическая ошибка upsert ID ${merchantData.ID}:`, error.message);
-        return false;
-    }
 }
 
 // Парсинг одной страницы
@@ -328,6 +330,71 @@ async function parseMerchantPage(page, merchantId) {
     }
 }
 
+// Функция для сохранения результата в Supabase с использованием upsert
+async function saveMerchantDataToSupabase(merchantData) {
+    try {
+        // Отладочная информация
+        console.log(`🔍 Отладка merchantData для ID:`, {
+            ID: merchantData.ID,
+            title: merchantData.title,
+            typeOfID: typeof merchantData.ID
+        });
+
+        // Строгая валидация merchant_id
+        if (merchantData.ID === null || merchantData.ID === undefined || merchantData.ID === '') {
+            console.log(`⚠️ Пропускаем запись с null/undefined/empty merchant_id:`, merchantData);
+            return false;
+        }
+
+        const merchantIdStr = merchantData.ID.toString().trim();
+        if (merchantIdStr === '' || merchantIdStr === 'null' || merchantIdStr === 'undefined') {
+            console.log(`⚠️ Пропускаем запись с некорректным merchant_id: "${merchantIdStr}"`);
+            return false;
+        }
+
+        const record = {
+            merchant_id: merchantIdStr,
+            title: merchantData.title,
+            phone: merchantData.phone,
+            register_date: merchantData.registerDate,
+            reviews_count: merchantData.reviews ? parseInt(merchantData.reviews) : null,
+            rating: merchantData.rating ? parseFloat(merchantData.rating) : null,
+            rating_quantity: merchantData.ratingQuantity ? parseInt(merchantData.ratingQuantity) : null,
+            products_count: merchantData.productsCount ? parseInt(merchantData.productsCount) : null,
+            categories: merchantData.categories && merchantData.categories.length > 0 ? merchantData.categories : null,
+            parsed_at: new Date().toISOString()
+        };
+
+        // Дополнительная проверка перед отправкой
+        if (!record.merchant_id) {
+            console.error(`❌ Критическая ошибка: merchant_id все еще null после валидации:`, record);
+            return false;
+        }
+
+        // Используем upsert для автоматической вставки или обновления
+        const { error } = await supabase
+            .from('merchant_details')
+            .upsert([record], { 
+                onConflict: 'merchant_id',
+                ignoreDuplicates: false 
+            });
+
+        if (error) {
+            console.error(`❌ Ошибка upsert данных для ID ${merchantData.ID}:`, error.message);
+            console.error(`❌ Данные записи:`, record);
+            return false;
+        } else {
+            console.log(`💾 Данные для ID ${merchantData.ID} сохранены/обновлены в Supabase`);
+            return true;
+        }
+
+    } catch (error) {
+        console.error(`❌ Критическая ошибка upsert ID ${merchantData.ID}:`, error.message);
+        console.error(`❌ merchantData:`, merchantData);
+        return false;
+    }
+}
+
 // Запись обработанного ID в лог
 function logProcessedId(id) {
     fs.appendFileSync(ID_LOG_FILE, `${id}\n`);
@@ -341,8 +408,11 @@ function logProcessedId(id) {
 (async () => {
     console.log('🚀 Запуск парсера с подключением к Supabase...');
     
-    // Получаем общее количество валидных ID из базы
-    TOTAL_REQUESTS = await getTotalValidMerchantIds();
+    // Выбираем таблицу-источник
+    const selectedTable = await selectSourceTable();
+    
+    // Получаем общее количество ID из выбранной таблицы
+    TOTAL_REQUESTS = await getTotalMerchantIds(selectedTable);
     console.log(`🎯 Установлено максимальное количество запросов: ${TOTAL_REQUESTS}`);
 
     const browser = await puppeteer.launch({
@@ -376,8 +446,8 @@ function logProcessedId(id) {
 
     // Функция для загрузки новой порции ID
     async function loadMerchantIds() {
-        console.log(`📥 Загружаем новую порцию валидных ID из Supabase (offset: ${currentOffset})...`);
-        const newIds = await getValidMerchantIds(BATCH_SIZE, currentOffset);
+        console.log(`📥 Загружаем новую порцию ID из таблицы ${selectedTable} (offset: ${currentOffset})...`);
+        const newIds = await getMerchantIds(selectedTable, BATCH_SIZE, currentOffset);
         
         if (newIds.length === 0) {
             console.log('⚠️ Не удалось получить новые ID из Supabase или достигнут конец данных');
@@ -455,12 +525,25 @@ function logProcessedId(id) {
 
                 const result = await parseMerchantPage(page, merchantId);
 
+                // Отладочная информация
+                console.log(`🔍 Результат парсинга для merchantId ${merchantId}:`, {
+                    resultID: result?.ID,
+                    resultTitle: result?.title,
+                    originalMerchantId: merchantId
+                });
+
                 if (result && result.title) {
+                    // Дополнительная проверка ID перед сохранением
+                    if (!result.ID) {
+                        console.error(`❌ Результат парсинга не содержит ID! merchantId: ${merchantId}, result:`, result);
+                        result.ID = merchantId; // Принудительно устанавливаем ID
+                    }
+                    
                     // Сохраняем в Supabase вместо Excel
-                    const saved = await saveMerchantDataToSupabase(result); // Используем upsert
+                    const saved = await saveMerchantDataToSupabase(result);
                     if (saved) {
                         foundMerchants++;
-                        console.log(`✅ Добавлено: ${result.title} (ID: ${merchantId})`);
+                        console.log(`✅ Добавлено: ${result.title} (ID: ${result.ID})`);
                     }
                 } else {
                     skippedMerchants++;
