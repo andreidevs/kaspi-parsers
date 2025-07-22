@@ -10,13 +10,14 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // Настройки
 const OUTPUT_FILE = 'valid_merchant_ids.txt';
 const ID_LOG_FILE = 'processed_api_ids.txt';
+const ID_LOG_BACKUP = 'processed_api_ids_backup.txt';
 const TOTAL_REQUESTS = 10000000000;
 const CONCURRENT_REQUESTS = 50;
 const MIN_ID_LENGTH = 7;
 const MAX_ID_LENGTH = 8;
-const MAX_SET_SIZE = 1000000; // Максимальный размер Set в памяти
-const CLEANUP_INTERVAL = 100000; // Очищать Set каждые 100k записей
-const SUPABASE_BATCH_SIZE = 100; // Размер батча для Supabase
+const MAX_SET_SIZE = 100000;
+const CLEANUP_INTERVAL = 100000;
+const FILE_SIZE_LIMIT = 100 * 1024 * 1024; // 100MB лимит для файла
 
 // Массив User-Agent
 const userAgents = [
@@ -42,36 +43,109 @@ const proxyConfigs = [
 
 console.log(`📡 Загружено ${proxyConfigs.length} прокси конфигураций`);
 
-// Чтение уже обработанных ID (только последние для экономии памяти)
+// Переменные для отслеживания
 let processedIds = new Set();
 let totalProcessedCount = 0;
 
-// Буфер для батчевой записи в Supabase
-let validIdsBatch = [];
+// Функция для ротации файла логов
+function rotateLogFile() {
+    try {
+        if (fs.existsSync(ID_LOG_FILE)) {
+            const stats = fs.statSync(ID_LOG_FILE);
+            
+            if (stats.size > FILE_SIZE_LIMIT) {
+                console.log(`📁 Файл лога достиг ${Math.round(stats.size / 1024 / 1024)}MB, выполняем ротацию...`);
+                
+                // Создаем бэкап старого файла
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const backupName = `processed_api_ids_${timestamp}.txt`;
+                fs.renameSync(ID_LOG_FILE, backupName);
+                
+                console.log(`📁 Старый лог сохранен как: ${backupName}`);
+                
+                // Очищаем Set так как начинаем новый файл
+                processedIds.clear();
+                totalProcessedCount = 0;
+                
+                return true;
+            }
+        }
+        return false;
+    } catch (error) {
+        console.error('❌ Ошибка ротации файла:', error.message);
+        return false;
+    }
+}
 
+// Функция для чтения только последней части файла
 function loadRecentProcessedIds() {
-    if (fs.existsSync(ID_LOG_FILE)) {
-        const data = fs.readFileSync(ID_LOG_FILE, 'utf-8');
-        const lines = data.split('\n').filter(line => line.trim());
-        totalProcessedCount = lines.length;
+    try {
+        // Сначала проверяем нужна ли ротация
+        rotateLogFile();
         
-        // Загружаем только последние MAX_SET_SIZE записей для экономии памяти
-        const recentLines = lines.slice(-MAX_SET_SIZE);
-        processedIds = new Set(recentLines);
-        
-        console.log(`📋 Всего обработано: ${totalProcessedCount}, в памяти: ${processedIds.size} ID`);
+        if (fs.existsSync(ID_LOG_FILE)) {
+            const stats = fs.statSync(ID_LOG_FILE);
+            console.log(`📋 Размер файла логов: ${Math.round(stats.size / 1024 / 1024)}MB`);
+            
+            // Если файл слишком большой, читаем только последнюю часть
+            if (stats.size > 50 * 1024 * 1024) { // Если больше 50MB
+                console.log(`📋 Файл большой, читаем только последние записи...`);
+                
+                const fd = fs.openSync(ID_LOG_FILE, 'r');
+                const bufferSize = 10 * 1024 * 1024; // Читаем последние 10MB
+                const buffer = Buffer.alloc(bufferSize);
+                const position = Math.max(0, stats.size - bufferSize);
+                
+                fs.readSync(fd, buffer, 0, bufferSize, position);
+                fs.closeSync(fd);
+                
+                const data = buffer.toString('utf-8');
+                const lines = data.split('\n').filter(line => line.trim());
+                
+                // Берем только последние записи
+                const recentLines = lines.slice(-MAX_SET_SIZE);
+                processedIds = new Set(recentLines);
+                totalProcessedCount = lines.length; // Приблизительное количество
+                
+                console.log(`📋 Загружено последних ${processedIds.size} ID из файла`);
+            } else {
+                // Файл небольшой, читаем полностью
+                const data = fs.readFileSync(ID_LOG_FILE, 'utf-8');
+                const lines = data.split('\n').filter(line => line.trim());
+                totalProcessedCount = lines.length;
+                
+                const recentLines = lines.slice(-MAX_SET_SIZE);
+                processedIds = new Set(recentLines);
+                
+                console.log(`📋 Всего обработано: ${totalProcessedCount}, в памяти: ${processedIds.size} ID`);
+            }
+        } else {
+            console.log(`📋 Файл логов не найден, начинаем с нуля`);
+        }
+    } catch (error) {
+        console.error('❌ Ошибка загрузки логов:', error.message);
+        console.log('📋 Начинаем с чистого листа');
+        processedIds = new Set();
+        totalProcessedCount = 0;
     }
 }
 
 loadRecentProcessedIds();
 
-// Функция для очистки Set при превышении лимита
+// Функция для очистки памяти
 function cleanupProcessedIds() {
     if (processedIds.size >= MAX_SET_SIZE) {
         console.log(`🧹 Очистка памяти: Set достиг ${processedIds.size} элементов`);
-        processedIds.clear();
-        // Перезагружаем только последние записи
-        loadRecentProcessedIds();
+        
+        // Оставляем только половину самых новых записей
+        const idsArray = Array.from(processedIds);
+        const keepCount = Math.floor(MAX_SET_SIZE / 2);
+        processedIds = new Set(idsArray.slice(-keepCount));
+        
+        // Принудительная сборка мусора если доступна
+        if (global.gc) {
+            global.gc();
+        }
     }
 }
 
@@ -93,57 +167,12 @@ function getRandomProxy() {
     return proxyConfigs[Math.floor(Math.random() * proxyConfigs.length)];
 }
 
-// Функция для проверки, был ли ID уже обработан (более эффективная проверка)
+// Функция для проверки обработанного ID
 function isIdProcessed(merchantId) {
-    // Сначала проверяем в памяти
-    if (processedIds.has(merchantId.toString())) {
-        return true;
-    }
-    
-    // Если в памяти нет и файл большой, делаем вероятностную проверку
-    // (принимаем небольшой риск дублирования для экономии памяти)
-    return false;
+    return processedIds.has(merchantId.toString());
 }
 
-// Функция для записи валидных ID в Supabase батчами
-async function saveValidIdsBatchToSupabase() {
-    if (validIdsBatch.length === 0) return;
-
-    try {
-        const records = validIdsBatch.map(item => ({
-            merchant_id: parseInt(item.merchantId),
-            data_length: item.dataLength,
-            found_at: new Date().toISOString()
-        }));
-
-        const { error } = await supabase
-            .from('generateid_valid')
-            .insert(records);
-
-        if (error) {
-            console.error('❌ Ошибка записи в Supabase:', error.message);
-            // В случае ошибки сохраняем в файл как резерв
-            validIdsBatch.forEach(item => {
-                fs.appendFileSync(OUTPUT_FILE, `${item.merchantId}\n`);
-            });
-        } else {
-            console.log(`💾 Сохранено ${records.length} валидных ID в Supabase`);
-        }
-
-        // Очищаем батч
-        validIdsBatch = [];
-
-    } catch (error) {
-        console.error('❌ Критическая ошибка Supabase:', error.message);
-        // В случае ошибки сохраняем в файл как резерв
-        validIdsBatch.forEach(item => {
-            fs.appendFileSync(OUTPUT_FILE, `${item.merchantId}\n`);
-        });
-        validIdsBatch = [];
-    }
-}
-
-// Функция для выполнения HTTP запроса с повторными попытками
+// Функция для выполнения HTTP запроса
 async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttempts = 3) {
     const url = `https://kaspi.kz/yml/review-view/api/v1/reviews/merchant/${merchantId}`;
     const userAgent = getRandomUserAgent();
@@ -169,7 +198,6 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
         }
     };
 
-    // Добавляем прокси если есть
     if (proxyConfig) {
         config.proxy = {
             protocol: proxyConfig.protocol,
@@ -185,15 +213,12 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
     try {
         const response = await axios(config);
 
-        // Если получили 429 (Too Many Requests) и есть попытки
         if (response.status === 429 && attempt < maxAttempts) {
             console.log(`⚠️ 429 ошибка для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 100мс...`);
-            
             await new Promise(resolve => setTimeout(resolve, 100));
             return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
         }
 
-        // Проверяем что ответ успешный и есть данные
         const hasData = response.status === 200 && 
                        response.data && 
                        response.data.data && 
@@ -211,10 +236,8 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
         };
 
     } catch (error) {
-        // При ошибке сети тоже можем повторить
         if (attempt < maxAttempts && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND')) {
             console.log(`⚠️ Ошибка сети для ID ${merchantId}, попытка ${attempt}/${maxAttempts}. Повтор через 200мс...`);
-            
             await new Promise(resolve => setTimeout(resolve, 200));
             return makeRequest(merchantId, proxyConfig, attempt + 1, maxAttempts);
         }
@@ -232,7 +255,7 @@ async function makeRequest(merchantId, proxyConfig = null, attempt = 1, maxAttem
     }
 }
 
-// Функция для записи валидного ID сразу в Supabase
+// Функция для записи валидного ID в Supabase
 async function saveValidIdToSupabase(merchantId, dataLength) {
     try {
         const record = {
@@ -247,7 +270,6 @@ async function saveValidIdToSupabase(merchantId, dataLength) {
 
         if (error) {
             console.error(`❌ Ошибка записи ID ${merchantId} в Supabase:`, error.message);
-            // В случае ошибки сохраняем в файл как резерв
             fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
             return false;
         } else {
@@ -257,19 +279,16 @@ async function saveValidIdToSupabase(merchantId, dataLength) {
 
     } catch (error) {
         console.error(`❌ Критическая ошибка записи ID ${merchantId}:`, error.message);
-        // В случае ошибки сохраняем в файл как резерв
         fs.appendFileSync(OUTPUT_FILE, `${merchantId}\n`);
         return false;
     }
 }
 
-// Обновленная функция для записи валидного ID
-async function saveValidId(merchantId, dataLength) {
-    await saveValidIdToSupabase(merchantId, dataLength);
-}
-
 // Функция для записи обработанного ID
 function logProcessedId(merchantId) {
+    // Проверяем нужна ли ротация файла перед записью
+    rotateLogFile();
+    
     fs.appendFileSync(ID_LOG_FILE, `${merchantId}\n`);
     processedIds.add(merchantId.toString());
     totalProcessedCount++;
@@ -280,7 +299,7 @@ function logProcessedId(merchantId) {
     }
 }
 
-// Обновленная основная функция обработки
+// Основная функция обработки
 async function processId() {
     let merchantId;
     let attempts = 0;
@@ -300,9 +319,8 @@ async function processId() {
     try {
         const result = await makeRequest(merchantId, proxyConfig);
 
-        // Сразу сохраняем в Supabase если есть данные
         if (result.hasData) {
-            await saveValidId(merchantId, result.dataLength);
+            await saveValidIdToSupabase(merchantId, result.dataLength);
             console.log(`✅ ID ${merchantId}: найдено ${result.dataLength} отзывов, сохранено в базу`);
         } else if (result.success) {
             // console.log(`ℹ️ ID ${merchantId}: ответ 200, но данных нет (${result.dataLength} отзывов)`);
@@ -370,9 +388,6 @@ async function processId() {
     }
 
     await Promise.all(promises);
-
-    // Сохраняем оставшиеся валидные ID
-    await saveValidIdsBatchToSupabase();
 
     console.log('✅ Парсинг завершён!');
     console.log(`📊 Итоговая статистика:`);
